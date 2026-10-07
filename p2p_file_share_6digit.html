@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>6-Digit P2P File Share</title>
+<style>
+:root{color-scheme:dark;--bg:#0b1020;--card:#121a2b;--card2:#18233a;--text:#edf2ff;--muted:#9eabc4;--accent:#6ea8fe;--ok:#4ade80;--danger:#fb7185;--border:#283650}
+*{box-sizing:border-box}body{margin:0;font-family:system-ui,-apple-system,Segoe UI,sans-serif;background:radial-gradient(circle at top,#162544,#0b1020 55%);color:var(--text);min-height:100vh}
+main{max-width:900px;margin:auto;padding:32px 18px}.hero{text-align:center;margin-bottom:25px}.hero h1{font-size:clamp(28px,5vw,44px);margin:0 0 8px}.hero p{color:var(--muted);margin:0}
+.card{background:rgba(18,26,43,.94);border:1px solid var(--border);border-radius:18px;padding:22px;margin:16px 0;box-shadow:0 15px 45px #0005}
+.tabs{display:flex;gap:8px;margin-bottom:18px}.tab{flex:1;padding:12px;border:1px solid var(--border);background:var(--card2);color:var(--text);border-radius:10px;cursor:pointer;font-weight:700}.tab.active{border-color:var(--accent);background:#1b3158}
+label{display:block;color:var(--muted);font-size:13px;margin:12px 0 6px}.code{font-size:38px;letter-spacing:9px;font-weight:800;text-align:center;padding:14px;background:#0b1325;border:1px dashed #48618e;border-radius:14px;margin:10px 0 15px}
+button,.filepick{border:0;border-radius:10px;padding:11px 15px;font-weight:700;cursor:pointer;background:var(--accent);color:#07101f}.secondary{background:var(--card2);color:var(--text);border:1px solid var(--border)}button:disabled{opacity:.45;cursor:not-allowed}
+.row{display:flex;gap:10px;flex-wrap:wrap}.row>*{flex:1}.hidden{display:none!important}
+input[type=text]{width:100%;padding:13px;border-radius:10px;border:1px solid var(--border);background:#0b1325;color:var(--text);font-size:20px;letter-spacing:4px;text-align:center}
+.filepick{display:block;text-align:center;margin:14px 0}.filepick input{display:none}
+.file{padding:14px;background:#0b1325;border-radius:12px;margin:10px 0;border:1px solid var(--border)}.file strong{display:block}.meta{color:var(--muted);font-size:13px;margin-top:4px}
+.progress{height:9px;background:#26334d;border-radius:99px;overflow:hidden;margin-top:10px}.bar{height:100%;width:0;background:var(--accent);transition:width .12s}
+.peer{display:flex;justify-content:space-between;padding:10px 12px;background:#0b1325;border-radius:9px;margin:7px 0}.dot{color:var(--ok)}
+.status{color:var(--muted);font-size:14px;min-height:20px}.warn{color:#fbbf24;font-size:13px;line-height:1.5}.ok{color:var(--ok)}.error{color:var(--danger)}
+footer{text-align:center;color:#687795;font-size:12px;margin-top:25px}
+</style>
+</head>
+<body>
+<main>
+<section class="hero">
+<h1>⚡ P2P File Share</h1>
+<p>Share files directly between browsers using a 6-digit code.</p>
+</section>
+
+<div class="card">
+<div class="tabs">
+<button class="tab active" id="hostTab">Send files</button>
+<button class="tab secondary" id="joinTab">Receive files</button>
+</div>
+
+<section id="hostPanel">
+<p>Start a room. Give the 6-digit code to as many peers as you want.</p>
+<div class="code" id="roomCode">------</div>
+<div class="row">
+<button id="newRoom">Create new room</button>
+<button id="copyCode" class="secondary" disabled>Copy code</button>
+</div>
+<label>Connected peers</label>
+<div id="peers"><div class="status">No peers connected.</div></div>
+
+<label class="filepick">📁 Choose files to send
+<input id="files" type="file" multiple>
+</label>
+<div id="fileList"></div>
+<div class="warn">Files are transferred peer-to-peer with WebRTC. The signaling service is used only to establish connections. Keep this page open while transferring.</div>
+</section>
+
+<section id="joinPanel" class="hidden">
+<p>Enter the sender's 6-digit code.</p>
+<input id="joinCode" maxlength="6" inputmode="numeric" placeholder="123456">
+<div class="row" style="margin-top:12px"><button id="join">Connect</button><button id="disconnect" class="secondary" disabled>Disconnect</button></div>
+<div id="joinStatus" class="status" style="margin-top:12px"></div>
+<label>Incoming files</label>
+<div id="downloads"><div class="status">Nothing received yet.</div></div>
+</section>
+</div>
+
+<div class="card">
+<strong>How it works</strong>
+<ol style="color:var(--muted);line-height:1.7">
+<li>Sender creates a room and shares the 6-digit code.</li>
+<li>Each receiver opens this same HTML file and enters the code.</li>
+<li>Receivers connect directly to the sender through WebRTC.</li>
+<li>The sender can select multiple files; each connected peer receives them independently.</li>
+</ol>
+</div>
+<footer>Single HTML • WebRTC data channels • No application server required</footer>
+</main>
+
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>
+"use strict";
+
+const $ = id => document.getElementById(id);
+const CHUNK = 64 * 1024;
+let peer = null, room = null, connections = new Map(), selectedFiles = [];
+let receiveState = null;
+
+function randomCode(){
+  return String(Math.floor(100000 + Math.random()*900000));
+}
+function fmt(n){
+  const u=["B","KB","MB","GB","TB"]; let i=0;
+  while(n>=1024 && i<u.length-1){n/=1024;i++}
+  return n.toFixed(i?1:0)+" "+u[i];
+}
+function status(el,msg,cls=""){el.className="status "+cls;el.textContent=msg}
+function switchTab(host){
+  $("hostPanel").classList.toggle("hidden",!host);
+  $("joinPanel").classList.toggle("hidden",host);
+  $("hostTab").classList.toggle("active",host);
+  $("joinTab").classList.toggle("active",!host);
+  $("hostTab").classList.toggle("secondary",!host);
+  $("joinTab").classList.toggle("secondary",host);
+}
+
+$("hostTab").onclick=()=>switchTab(true);
+$("joinTab").onclick=()=>switchTab(false);
+
+function renderPeers(){
+  if(!connections.size){$("peers").innerHTML='<div class="status">No peers connected.</div>';return}
+  $("peers").innerHTML="";
+  for(const [id,c] of connections){
+    const d=document.createElement("div");d.className="peer";
+    d.innerHTML='<span><span class="dot">●</span> '+id.replace("share-","")+'</span><span class="meta">connected</span>';
+    $("peers").appendChild(d);
+  }
+}
+function addConnection(c){
+  connections.set(c.peer,c);
+  c.on("open",()=>{connections.set(c.peer,c);renderPeers()});
+  c.on("close",()=>{connections.delete(c.peer);renderPeers()});
+  c.on("error",e=>console.warn(e));
+  renderPeers();
+}
+
+async function createRoom(){
+  if(peer){try{peer.destroy()}catch{}}
+  connections.clear(); renderPeers();
+  room=randomCode();
+  $("roomCode").textContent=room;
+  $("copyCode").disabled=false;
+  status($("peers"),"Opening signaling connection…");
+  peer=new Peer("share-"+room,{debug:0});
+  peer.on("open",()=>{renderPeers();status($("peers"),"Room ready. Share the code above.")});
+  peer.on("connection",c=>addConnection(c));
+  peer.on("error",e=>{
+    console.error(e);
+    status($("peers"),"Could not open room: "+(e.type||e.message),"error");
+  });
+}
+$("newRoom").onclick=createRoom;
+$("copyCode").onclick=async()=>{try{await navigator.clipboard.writeText(room);$("copyCode").textContent="Copied!"}catch{}setTimeout(()=>$("copyCode").textContent="Copy code",1200)};
+
+$("files").onchange=e=>{
+  selectedFiles=[...e.target.files];
+  $("fileList").innerHTML="";
+  for(const f of selectedFiles){
+    const d=document.createElement("div");d.className="file";
+    d.innerHTML='<strong>'+escapeHtml(f.name)+'</strong><div class="meta">'+fmt(f.size)+'</div><div class="progress"><div class="bar"></div></div>';
+    d.dataset.name=f.name;$("fileList").appendChild(d);
+  }
+  if(selectedFiles.length) broadcastFiles();
+};
+
+async function broadcastFiles(){
+  if(!connections.size){status($("peers"),"Select files after at least one peer connects.");return}
+  for(const file of selectedFiles){
+    for(const c of connections.values()){
+      if(c.open) sendFile(c,file);
+    }
+  }
+}
+function sendFile(c,file){
+  const wrap=[...$("fileList").children].find(x=>x.dataset.name===file.name);
+  const bar=wrap?.querySelector(".bar");
+  c.send({type:"file-start",name:file.name,size:file.size,mime:file.type||"application/octet-stream"});
+  let offset=0;
+  const reader=new FileReader();
+  reader.onload=()=>{
+    if(!c.open)return;
+    try{
+      c.send(reader.result); offset+=reader.result.byteLength;
+      if(bar)bar.style.width=(offset/file.size*100)+"%";
+      if(offset<file.size)readNext();
+      else c.send({type:"file-end",name:file.name});
+    }catch(e){console.error(e)}
+  };
+  reader.onerror=()=>console.error(reader.error);
+  function readNext(){reader.readAsArrayBuffer(file.slice(offset,offset+CHUNK))}
+  readNext();
+}
+
+function connect(){
+  const code=$("joinCode").value.trim();
+  if(!/^\d{6}$/.test(code)){status($("joinStatus"),"Enter a valid 6-digit code.","error");return}
+  if(peer){try{peer.destroy()}catch{}}
+  $("join").disabled=true;$("disconnect").disabled=false;
+  status($("joinStatus"),"Connecting…");
+  peer=new Peer();
+  peer.on("open",()=>{
+    const c=peer.connect("share-"+code,{reliable:true});
+    c.on("open",()=>status($("joinStatus"),"Connected. Waiting for files.","ok"));
+    c.on("data",handleIncoming);
+    c.on("close",()=>status($("joinStatus"),"Connection closed."));
+    c.on("error",e=>status($("joinStatus"),"Connection error: "+e.message,"error"));
+  });
+  peer.on("error",e=>{
+    status($("joinStatus"),"Could not connect: "+(e.type||e.message),"error");
+    $("join").disabled=false;$("disconnect").disabled=true;
+  });
+}
+$("join").onclick=connect;
+$("disconnect").onclick=()=>{
+  if(peer)peer.destroy();peer=null;
+  $("join").disabled=false;$("disconnect").disabled=true;
+  status($("joinStatus"),"Disconnected.");
+};
+
+function handleIncoming(data){
+  if(data?.type==="file-start"){
+    receiveState={name:data.name,size:data.size,mime:data.mime,chunks:[],received:0};
+    const d=document.createElement("div");d.className="file";d.id="rx-"+Math.random().toString(36).slice(2);
+    d.innerHTML='<strong>'+escapeHtml(data.name)+'</strong><div class="meta">0 / '+fmt(data.size)+'</div><div class="progress"><div class="bar"></div></div>';
+    d._state=receiveState;$("downloads").appendChild(d);
+    $("downloads").querySelector(".status")?.remove();
+  }else if(data instanceof ArrayBuffer || data instanceof Uint8Array){
+    if(!receiveState)return;
+    const a=data instanceof ArrayBuffer?data:data.buffer;
+    receiveState.chunks.push(a);receiveState.received+=a.byteLength;
+    const els=[...$("downloads").children];const d=els[els.length-1];
+    if(d?.querySelector(".meta"))d.querySelector(".meta").textContent=fmt(receiveState.received)+" / "+fmt(receiveState.size);
+    if(d?.querySelector(".bar"))d.querySelector(".bar").style.width=(receiveState.received/receiveState.size*100)+"%";
+  }else if(data?.type==="file-end"){
+    if(!receiveState)return;
+    const blob=new Blob(receiveState.chunks,{type:receiveState.mime});
+    const url=URL.createObjectURL(blob);
+    const d=[...$("downloads").children].at(-1);
+    if(d){
+      const a=document.createElement("a");a.href=url;a.download=receiveState.name;a.textContent="⬇ Download";
+      a.style.display="inline-block";a.style.marginTop="10px";a.style.color="#6ea8fe";a.style.fontWeight="700";
+      d.appendChild(a);
+    }
+    receiveState=null;
+  }
+}
+function escapeHtml(s){
+  return s.replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+window.addEventListener("beforeunload",()=>{if(peer)peer.destroy()});
+createRoom();
+</script>
+</body>
+</html>
